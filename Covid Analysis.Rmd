@@ -1,0 +1,890 @@
+---
+title: "Covid-19 Analysis-USA"
+author: 
+- "Kashika Tyagi, Northeastern University"
+date: "5/4/2020"
+output: html_document
+---
+
+**Goal**:  
+================================
+The goal is to predict the cumulative number of confirmed cases and resulting fatalities, for the upcoming dates within United States.
+
+**COVID-19 Background**:
+================================
+COVID-19 is caused by a new coronavirus disease. The Coronaviridae family includes a group of large, single, and plus stranded RNA viruses isolated from multiple species, and known to cause the common cold and diarrheal diseases in humans (Dey, Rahman, Siddiqi, & Howlader, 2020). 
+In the United States, different parts of the country are seeing different levels of COVID-19 activity. Currently, the United States nationally is in the acceleration phase of the pandemic (National Center for Immunization and Respiratory Diseases, 2020). 
+
+**Introduction and Dataset Description**:  
+================================
+
+Working on two Covid-19 datasets which is collected by Johns Hopkins University.
+
+*Dataset 1-* Johns Hopkins COVID-19 Case Tracker
+* The data is available at county level in the United States and represents the number of confirmed cases, number of deaths reported by each state in the United States. 
+* There are 13 variables and 2886 observations, and this dataset is paired with population data of counties both urban and rural.  
+
+*Dataset 2-* Timeseries COVID-19 Cases and Deaths
+* This dataset contains daily time series data of United States, including confirmed cases and deaths, reported at the county level. 
+* There are 15 variables and 338208 observations in the dataset; we will be using 5 variables only for our analysis as others are not required in the prediction of future cases.
+5 key variables that we are using: 'date', 'state', 'cumulative_cases', 'cumulative_deaths', 'location_name'. 
+
+*Note:* We have data starting from Jan-22-2020 until May-4-2020 but have zero cumulative cases and deaths until Mar-23-2020.
+
+
+**Risk assessment**:    
+================================
+1. The dataset we are using was updated on 2020-04-29, not a dynamic dataset. Thus, there is a possibility of lacking accuracy for the present environment.    
+2. Lack of sufficient historical data to make forecast.    
+
+**Analysis Methods**:    
+================================
+1. Exploratory Data Analysis (EDA)  
+2. Linear Regression Model  
+3. Time series analysis  
+4. SIR Model using Covid19.Analytics package
+
+------------------------------------
+
+### Loading the required pacakges  
+
+```{r,eval=TRUE, results='hide', message=FALSE, warning=FALSE}
+
+check.packages <- function(pkg){
+    new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+    if (length(new.pkg)) 
+        install.packages(new.pkg, dependencies = TRUE)
+    sapply(pkg, require, character.only = TRUE)
+}
+
+packages<-c("stats4", "dplyr", "stringr", "tidyr", "ggplot2", "reshape2", "rpart", "corrplot", "geosphere", "leaflet", "leaflet.extras", "maps", "ggpubr", "psych", "mice", "VIM", "tidyverse", "lubridate", "forecast", "tseries", "xts", "caret", "caTools","ggfortify", "astsa", "changepoint", "strucchange", "magrittr","TSstudio", "plotly", "RColorBrewer", "prophet", "lattice", "dygraphs", "viridis","usmap")
+check.packages(packages)
+
+```
+
+### Loading the covid-19 county level data
+
+```{r}
+getwd <- getwd()
+setwd(getwd)
+df <- read.csv("county_level_confirmed_cases.csv")
+
+```
+
+### Data Manipultaion    
+
+```{r}
+#Assigning smaller names to the variables
+colnames(df)
+names(df)[names(df) == "deaths_per_100000"] <- "DeathsPer"
+names(df)[names(df) == "confirmed_per_100000"] <- "ConfirmedPer"
+names(df)[names(df) == "total_population"] <- "Population"
+names(df)[names(df) == "county_name_long"] <- "FullCountyName"
+```
+
+
+```{r}
+cat('Data Dimensions are: ', dim(df))
+summary(df)
+```
+
+* As can be seen from the output of the above summary, there are few NA values. We need to handle the missing values
+
+
+```{r}
+colSums(is.na(df))
+```
+* Since there are missing values in the numeric columns, we think the best way to impute missing values is using Predictive Mean Matching (PMM), from MICE package, to fill them.  
+      
+* MICE (Multivariate Imputation via Chained Equations) assumes that the missing data are missing randomly. The original dataset shows that the cases of data missing only related to the observed data, while the missing value can be predicted by using existing data via MICE.   
+
+```{r}
+
+numeric_df  <- select_if(df, is.numeric)
+
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+
+mice_plot <- aggr(numeric_df, col=mdc(1:2),
+                    numbers=TRUE, sortVars=TRUE,
+                    labels=names(numeric_df), cex.axis=.7,
+                    gap=3, ylab=c("Missing data","Pattern"))
+
+```
+
+* The density chart clearly displays the pattern of our dataset missing, and surprisingly, the statistic of confirmed cases and deaths are totally complete so that we don't need to conduct any prediction. Meanwhile, the histogram clearly depicts the influence of missing values on the variables. For example, due to the incomplete number of populations, the confirmed cases per unit also can't be counted.  
+  
+* Imputing the dataset using PMM method, in this case, 'm' refers to 5 imputed data sets; 'maxit' refers to the number of iterations taken to impute the missing values, and 'method' refers to 'predictive mean matching'.
+
+```{r,eval=TRUE, results='hide', message=FALSE, warning=FALSE}
+
+imputed_Data <- mice(numeric_df, m=5, maxit = 10, method = 'mean', seed = 40)
+
+#summary(imputed_Data)
+``` 
+
+
+```{r}
+#Imputed dataset
+imputed_Data=complete(imputed_Data,5)
+cat(dim(imputed_Data))
+head(imputed_Data)
+
+```
+
+Let's look if we have got the NAs imputed:  
+
+```{r}
+
+colSums(is.na(imputed_Data)) #check the reamin NA
+imputed_Data$last_update = df$last_update
+imputed_Data$state = df$state
+imputed_Data$county_name = df$county_name
+imputed_Data$FullCountyName = df$FullCountyName
+imputed_Data$NCHS_urbanization = df$NCHS_urbanization
+
+```
+
+* Now there are no missing or NA values in the dataset, thus we can start with our further analysis.  
+
+------------------------------------
+
+Exploratory Data Analysis  
+------------------------------------
+
+Exploratory data analysis is a method to process initial data exploration, such as visualization or basic statistics to provide a preliminary understanding of the data to facilitate subsequent complex or rigorous analysis of the data.  
+  
+In this case, for two such large scale datasets, we finish the basic data visualization using EDA to help us decide the strategies in further analysis. According to the charts, such as bar charts and heatmap, we can discover the significant pattern in the dataset and then dig out the underlying questions.  
+
+```{r,eval=TRUE, results='hide', message=FALSE, warning=FALSE}
+
+suppressPackageStartupMessages(library(tidyverse)) 
+ suppressPackageStartupMessages(library(ggplot2))
+ suppressPackageStartupMessages(library(viridis))
+
+```
+  
+    
+1. Total confirmed cases by state- top 10  
+------------------------------------
+```{r}
+
+ imputed_Data %>% filter(state!="Unknown") %>% group_by(state) %>% summarise(TOTALSTATE=sum(confirmed)) %>% 
+ arrange(desc(TOTALSTATE)) %>% head(10) %>%
+ ggplot(aes(x=reorder(state,TOTALSTATE),y=TOTALSTATE, fill=factor(state))) + 
+ geom_bar(stat='identity') +  coord_flip() +
+ theme_light() +
+ ggtitle("Confirmed Cases by State") + xlab("County") + ylab("Count") +
+ theme(legend.position="none")
+
+```
+
+From the above graph, this is clearly evident that the highest number of cases are in New York state followed by New Jersey and California.   
+    
+2. Total confirmed cases by county- top 10   
+------------------------------------
+```{r}
+
+ imputed_Data %>% filter(county_name!="Unknown") %>% group_by(county_name) %>% summarise(TOTAL=sum(confirmed)) %>% 
+ arrange(desc(TOTAL)) %>% head(10) %>%
+ ggplot(aes(x=reorder(county_name,TOTAL),y=TOTAL, fill=factor(county_name))) + 
+ geom_bar(stat='identity') +  coord_flip() +
+ theme_light() +
+ ggtitle(" Confirmed Cases by County") + xlab("County") + ylab("Count") +
+ theme(legend.position="none")
+```
+
+At the County level, New York City and Suffolk experienced the highest number of cases. Not surprisingly, compared to other states, the number of confirmed cases of New York state keeps staying at the top of the list, having a huge gap with the rest.
+      
+
+3. Total death cases by state- top 10    
+------------------------------------
+```{r} 
+ imputed_Data %>% filter(state!="Unknown") %>% group_by(state) %>% summarise(TOTALSTATE=sum(deaths)) %>% 
+ arrange(desc(TOTALSTATE)) %>% head(10) %>%
+ ggplot(aes(x=reorder(state,TOTALSTATE),y=TOTALSTATE, fill=factor(state))) + 
+ geom_bar(stat='identity') +  coord_flip() +
+ theme_light() +
+ ggtitle("Death cases by State") + xlab("State") + ylab("Count") +
+ theme(legend.position="none")
+
+```
+  
+    
+4. Total death cases by county- top 10    
+------------------------------------
+```{r}
+
+ imputed_Data %>% filter(county_name!="Unknown") %>% group_by(county_name) %>% summarise(TOTAL=sum(deaths)) %>% 
+ arrange(desc(TOTAL)) %>% head(10) %>%
+ ggplot(aes(x=reorder(county_name,TOTAL),y=TOTAL, fill=factor(county_name))) + 
+ geom_bar(stat='identity') +  coord_flip() +
+ theme_light() +
+ ggtitle("Death cases by County") + xlab("County") + ylab("Count") +
+ theme(legend.position="none")
+
+```
+  
+**Summary:**  
+From the above graphs, it is clearly observed that the death cases in New York and New Jersey state are at the topmost while Michigan is at the third level instead of California state which being at third in number of confirmed cases.    
+  
+Worth to mention is that, although the confirmed cases of both Wayne and Nassau are not on the top 5, but their number of death cases are ranked in top 3.
+  
+
+5. Total confirmed cases and deaths on the U.S. map  
+--------------------------------
+
+```{r,message=FALSE, warning=FALSE}
+
+state_map <- us_map(regions = "states")
+county_map <- us_map(regions = "counties")
+```
+
+```{r,message=FALSE, warning=FALSE}
+#Libraries for state heat map
+ suppressPackageStartupMessages(library(usmap))
+
+#Rename 
+ colnames(statepop)[colnames(statepop)=="full"] <- "state"
+
+#Summarize data for map
+#Cases 
+  imputed_Data %>% select(state, deaths, confirmed) %>% group_by(state) %>%
+  summarize(TOTALCASES=sum(confirmed)) -> CASES
+#Deaths
+  imputed_Data %>% select(state, deaths, confirmed) %>% group_by(state) %>%
+  summarize(TOTALDEATHS=sum(deaths)) -> DEATHS
+
+#Convert sumarized data to data frame 
+ CASES<- data.frame(CASES)
+ DEATHS<-data.frame(DEATHS)
+
+#Merge data
+ ALLCASES<-left_join(CASES, statepop, by="state")
+ ALLDEATHS<-left_join(DEATHS, statepop,  by="state")
+
+#Plot maps
+ plot_usmap(data=ALLCASES, values="TOTALCASES", regions = "state") + 
+  scale_fill_viridis(discrete=FALSE) + 
+  theme(legend.position = "right") + labs(fill="TOATLCASES") +
+  ggtitle("Total Confirmed Cases by State")
+```
+
+```{r,message=FALSE, warning=FALSE}
+
+plot_usmap(data=ALLDEATHS, values="TOTALDEATHS", regions = "state") + 
+  scale_fill_viridis(discrete=FALSE) + 
+  theme(legend.position = "right") + labs(fill="TOTALDEATHS") +
+  ggtitle("Total Confirmed Deaths by State")
+ 
+```
+
+**Interpretation:**   
+Based on the bar and map charts, the number of confirmed cases and deaths that are significantly different between cities and countries. Therefore, we decided to explore the difference of confirmed cases between large cities to go further study the geographical distribution.
+In two visualization methods to process EDA, both can clearly demonstrate the comparison between states or cities, in confirmed or death number. The maps can directly show the density of cases whereas the bar charts can help the audience evaluate the differences. On the surface, the bar charts tell us that the greater the confirmed cases, the more deaths. To deeper analyze the relationship between confirmed cases and deaths, we plan to build a linear regression model.
+
+
+6. The total number of confirmed cases and deaths over time in United States from March to May
+--------------------------------
+
+Loading the timeseries dataset
+```{r}
+
+timeSeriesData <- read.csv("C:\\Users\\Kashika\\Desktop\\county_timeseries.csv")
+head(timeSeriesData)
+tail(timeSeriesData)
+timeSeriesData$date <-as.Date(timeSeriesData$date,format="%m/%d/%y") #set date format
+
+```
+
+```{r}
+
+#Total cases and deaths
+ ggplot(timeSeriesData, aes(date)) +                   
+ geom_line(aes(y=cumulative_cases), colour="cyan3") +
+ geom_line(aes(y=cumulative_deaths), colour="darkred") +  
+ theme_light() +
+ ggtitle(label="Total Cases and Deaths Over Time",  subtitle="blue=cases, red=deaths") + 
+ ylab("Count") + xlab("Date") + 
+ theme(axis.text.x=element_text(angle=40))
+
+```
+
+**Summary:**
+It is evident from the above graph as the number of confirmed cases are increasing exponentially, number of deaths are also increasing.  
+
+**Note:**  
+Since we do have zero entries in dataset until March 22, the graph does not show any values before it.  
+
+------------------------------------
+
+Linear Regression Model:
+------------------------------------
+
+To explore the relationship between total cases and deaths in the nation, we decide to use linear regression model to stimulate the trend so that we can predict upcoming condition. The linear mathematical model can determine the value of one dependent variable base on the value of one given independent variable.     
+Currently, the number of confirmed cases constantly increases. Although the rate has not fixed, we still can use the linear regression model to make a short-term prediction for the number of deaths.    
+-------------------------------------------------
+
+```{r}
+#abstract dataset
+dat <- select(timeSeriesData, cumulative_cases,cumulative_deaths)
+colnames(dat) <- c("totalConfirmed", "totalDeaths")
+summary(dat)
+```
+
+```{r}
+#build regression model using lm()
+dat_lm1 <- lm(totalDeaths~totalConfirmed, data=dat)
+options(digits=2)
+summary(dat_lm1)
+#plot the model
+ggplot(dat_lm1, aes(x = totalConfirmed, y = totalDeaths)) + 
+  geom_point(col ="red" )+
+  stat_smooth(method = "lm", col = "cornflowerblue")
+```
+  
+**Interpretation:**  
+Since p-values are smaller than 0.05, the linear regression shows a positive correlation between the total number of confirmed cases and deaths during February and May within the nation. For each 100 additional cases of confirmed cases, the deaths increase by 9.
+
+------------------------------------
+
+Time Series Analysis:  
+------------------------------------
+
+Time series analysis is a statistical technique that deals with analysis of time series data, or trend in order to extract meaningful statistics and other characteristics of the data. We perform time series forecasting to predict future values based on the previously observed values.   
+  
+Time series data represents a set of observations on the values that a variable takes at different times (in our dataset, we have date which represents time).  
+  
+We will be using Facebook's open source "Prophet model" to forecast total confirmed cases and deaths for future dates.  
+  
+
+#### State wise predictions- for top 3 states  
+
+0. Data Preparation  
+  
+Since, we do not need all the 15 variables thus, keeping only the columns that are required for our analysis using keep function.      
+```{r}
+
+keep <- c("uid", "location_name", "state", "date", "cumulative_cases", "cumulative_deaths")
+df  <- timeSeriesData[keep]
+head(df)
+tail(df)
+
+colSums(is.na(df))
+
+```
+
+* Now, we do not have any NA values, we are good to perform Exploratory Data Analysis. Also,let's assign meaningful names to the columns in order to make visualizations more effective.
+
+```{r}
+#changing names of the columns
+names(df)[names(df) == "location_name"] <- "county"
+names(df)[names(df) == "cumulative_cases"] <- "confirmedcases"
+names(df)[names(df) == "cumulative_deaths"] <- "deaths"
+
+colnames(df)
+
+```
+
+
+```{r}
+str(df)
+```
+
+* We have 2 variables i.e., county and state as a factor type, let's convert it to character type and parse the date column as "date" before peroforming future forecast. 
+
+```{r}
+#Converting factor datatypes to character
+df[["state"]] <- as.character(df[["state"]] )
+df[["county"]] <- as.character(df[["county"]] )
+
+```
+
+```{r}
+df$date <- as.Date(df$date, format = "%m/%d/%Y")
+str(df)
+head(df)
+
+```
+
+1. Getting Coronavirus data for New York state  
+-----------------------------------------------------
+We observed from our EDA that New York is at the top level in the number of confirmed cases as well as fatalities; let's dig deeper and predict the number of cases and fatalities for the next 45 days of the top 3 states and USA.  
+  
+Filter the data only for New York state and then aggregate the obtained data by taking sum of the total confirmed cases and deaths and finally group by date.   
+  
+
+```{r}
+
+# group by date
+
+coronaData_NewYork <- df %>%
+  
+  select(date, state, confirmedcases, deaths)  %>% 
+  
+  group_by(date) %>%
+  
+  filter(state == "New York") %>%
+  
+  summarise(totalConfirmed = sum(confirmedcases,na.rm=TRUE), totalDeaths = sum(deaths,na.rm=TRUE))
+
+tail(coronaData_NewYork)
+
+```
+
+The Prophet model requires the date column to be named 'ds' and the variable column to be named 'y' to perform forecast. 
+
+```{r}
+
+# get coronavirus confirmed cases data for New York state
+coronaData_confirmed_NewYork <- coronaData_NewYork %>%
+  select(date, totalConfirmed) 
+
+# get coronavirus deaths data for New York state
+coronaData_death_NewYork <- coronaData_NewYork %>%
+  select(date, totalDeaths)
+
+# transforming data for forecasting    
+names(coronaData_confirmed_NewYork) <- c("ds", "y")
+names(coronaData_death_NewYork) <- c("ds", "y")
+
+```
+
+* We can now apply Prophet Model to our obtained New York dataset.  
+* Here, 'yhat' represents the prediction, while 'yhat_lower' and 'yhat_upper' represents the lower and the upper bound of the prediction respectively.  
+
+```{r,message=FALSE, warning=FALSE}
+#Predicting covid-19 confirmed cases of New York State  using predict()  
+mNYcc <- prophet(coronaData_confirmed_NewYork)
+
+futureNYcc <- make_future_dataframe(mNYcc,periods = 45)
+
+forecastNYcc <- predict(mNYcc, futureNYcc)
+
+tail(forecastNYcc[c('ds', 'yhat', 'yhat_lower', 'yhat_upper')])
+```
+
+#### Plotting the Forecast 
+Visualization, in time series data, makes more sense than numbers. Therefore, we plot the forecast by calling plot() and prophet_plot_component() to see the daily, weekly, and monthly trends in order to have a clearer view of the trend.  
+  
+
+```{r,message=FALSE, warning=FALSE}
+#plot the prediction
+plot(mNYcc,forecastNYcc) + labs(title = "Predicting Cononavirus Confirmed Cases for New York State", 
+                        x= "Date", 
+                        y = "Count", daily.seasonality=TRUE )
+
+#broken down the prediction into trend and weekly seasonality and plot
+prophet_plot_components(mNYcc, forecastNYcc)
+dyplot.prophet(mNYcc, forecastNYcc)
+
+```
+
+
+```{r,eval=TRUE, message=FALSE, warning=FALSE}
+#Predicting covid-19 death cases of New York state
+mNYdeaths <- prophet(coronaData_death_NewYork)
+
+futureNYdeaths <- make_future_dataframe(mNYdeaths,periods = 45)
+
+forecastNYdeaths <- predict(mNYdeaths, futureNYdeaths)
+
+tail(forecastNYdeaths[c('ds', 'yhat', 'yhat_lower', 'yhat_upper')])
+
+#plot the prediction
+plot(mNYdeaths,forecastNYdeaths) + labs(title = "Predicting Cononavirus deaths for New York State", 
+                        x= "Date", 
+                        y = "Count", daily.seasonality=TRUE )
+
+#seperate the trend and weekly seasonality
+prophet_plot_components(mNYdeaths,forecastNYdeaths)
+dyplot.prophet(mNYdeaths,forecastNYdeaths)
+```
+
+**Interpretation**:    
+The plots above show a significant upward trend. Particularly, in the prediction of New York state, there is a dramatic increase in the number of confirmed cases and fatalities for the upcoming days. Let's further analyze the trend to arrive at a concrete conclusion.     
+    
+The trend shows an increase in the number of confirmed cases as well as fatalities for the upcoming days, which is not good. Also, we can observe that the cases and deaths are increasing more over the weekends as compared to weekdays and Monday experienced a smaller number of cases and deaths as compared to other days.   
+
+    
+2. Getting Coronavirus data for New Jersey state  
+-----------------------------------------------
+
+```{r}
+
+# group by date
+coronaData_NewJersey <- df %>%
+  
+  select(date, state, confirmedcases, deaths)  %>% 
+  
+  group_by(date) %>%
+  
+  filter(state == "New Jersey") %>%
+  
+  summarise(totalConfirmed = sum(confirmedcases,na.rm=TRUE), totalDeaths = sum(deaths,na.rm=TRUE))
+
+tail(coronaData_NewJersey)
+
+```
+
+
+```{r}
+
+# get coronavirus confirmed cases data for New Jersey state
+
+coronaData_confirmed_NewJersey <- coronaData_NewJersey %>%
+  select(date, totalConfirmed) 
+
+# get coronavirus deaths data for New Jersey state
+
+coronaData_death_NewJersey <- coronaData_NewJersey %>%
+  select(date, totalDeaths)
+
+# transforming data for forecasting  
+names(coronaData_confirmed_NewJersey) <- c("ds", "y")
+names(coronaData_death_NewJersey) <- c("ds", "y")
+
+```
+
+
+```{r,eval=TRUE, results='hide', message=FALSE, warning=FALSE}
+
+# for coronaData_confirmed_New Jersey
+
+mNJ <- prophet(coronaData_confirmed_NewJersey)
+
+futureNJ <- make_future_dataframe(mNJ,periods = 45)
+
+forecastNJ <- predict(mNJ, futureNJ)
+
+#tail(forecast[c('ds', 'yhat', 'yhat_lower', 'yhat_upper')])
+
+plot(mNJ,forecastNJ) + labs(title = "Predicting Cononavirus Confirmed Cases for New Jersey State", 
+                        x= "Date", 
+                        y = "Count")
+
+```
+
+
+```{r}
+
+dyplot.prophet(mNJ, forecastNJ)
+
+```
+
+  
+#### Predicting covid-19 death cases of New Jersey state  
+
+```{r,eval=TRUE, message=FALSE, warning=FALSE}
+
+mNJdeaths <- prophet(coronaData_death_NewJersey)
+
+futureNJdeaths <- make_future_dataframe(mNJdeaths,periods = 45)
+
+forecastNJdeaths <- predict(mNJdeaths, futureNJdeaths)
+
+#tail(forecastNJdeaths[c('ds', 'yhat', 'yhat_lower', 'yhat_upper')])
+
+plot(mNJdeaths,forecastNJdeaths) + labs(title = "Predicting Cononavirus deaths for New Jersey State", 
+                        x= "Date", 
+                        y = "Count", daily.seasonality=TRUE )
+```
+
+```{r}
+dyplot.prophet(mNJdeaths,forecastNJdeaths)
+
+```
+
+  
+3. Getting Coronavirus data for Massachusetts state  
+
+```{r}
+
+# group by date
+
+coronaData_Mass <- df %>%
+  
+  select(date, state, confirmedcases, deaths)  %>% 
+  
+  group_by(date) %>%
+  
+  filter(state == "Massachusetts") %>%
+  
+  summarise(totalConfirmed = sum(confirmedcases,na.rm=TRUE), totalDeaths = sum(deaths,na.rm=TRUE))
+
+```
+
+
+```{r}
+
+# get coronavirus confirmed cases data for Massachusetts state
+
+coronaData_confirmed_Mass <- coronaData_Mass %>%
+  select(date, totalConfirmed) 
+
+# get coronavirus deaths data for Massachusetts state
+
+coronaData_death_Mass <- coronaData_Mass %>%
+  select(date, totalDeaths)
+
+```
+
+
+```{r}
+
+names(coronaData_confirmed_Mass) <- c("ds", "y")
+names(coronaData_death_Mass) <- c("ds", "y")
+
+```
+
+
+```{r,eval=TRUE, results='hide', message=FALSE, warning=FALSE}
+
+# for coronaData_confirmed_Massachusetts 
+
+mMass <- prophet(coronaData_confirmed_Mass)
+
+futureMass <- make_future_dataframe(mMass,periods = 45)
+
+forecastMass <- predict(mMass, futureMass)
+
+#tail(forecast[c('ds', 'yhat', 'yhat_lower', 'yhat_upper')])
+
+plot(mMass,forecastMass) + labs(title = "Predicting Cononavirus Confirmed Cases for Massachusetts State", 
+                        x= "Date", 
+                        y = "Count", daily.seasonality=TRUE )
+
+```
+
+
+```{r}
+
+dyplot.prophet(mMass, forecastMass)
+
+```
+
+##### Predicting covid-19 death cases of Massachusetts state    
+
+```{r,eval=TRUE, message=FALSE, warning=FALSE}
+
+mMassdeaths <- prophet(coronaData_death_Mass)
+
+futureMassdeaths <- make_future_dataframe(mMassdeaths,periods = 45)
+
+forecastMassdeaths <- predict(mMassdeaths, futureMassdeaths)
+
+#tail(forecastMassdeaths[c('ds', 'yhat', 'yhat_lower', 'yhat_upper')])
+
+plot(mMassdeaths,forecastMassdeaths) + labs(title = "Predicting Cononavirus deaths for Massachusetts State", 
+                        x= "Date", 
+                        y = "Count", daily.seasonality=TRUE )
+```
+
+```{r}
+dyplot.prophet(mMassdeaths,forecastMassdeaths)
+
+```
+  
+4. Getting Coronavirus data for United States  
+  
+The figure shows the actual trend and prediction of the number of nationwide confirmed cases and deaths. We aggregate the data frame by taking the sum of the total confirmed cases and deaths.  
+
+```{r}
+
+# group by date
+
+coronaData_US <- df %>%
+  select(date, state, confirmedcases, deaths )  %>% 
+  
+  group_by(date) %>%
+  summarise(totalConfirmed = sum(confirmedcases,na.rm=TRUE), totalDeaths = sum(deaths,na.rm=TRUE))
+
+tail(coronaData_US)
+
+# get confirmed cases data of USA
+coronaData_confirmedUS<- coronaData_US %>%
+  select(date, totalConfirmed) 
+
+# get death cases data of USA
+coronaData_deathUS <- coronaData_US %>%
+  select(date, totalDeaths )
+
+```
+  
+* Transforming the columns to ds and y for forecasting as the Prophet model requires the date column to be named 'ds' and the variable column to be named 'y'.   
+
+```{r}
+
+names(coronaData_confirmedUS) <- c("ds", "y")
+names(coronaData_deathUS) <- c("ds", "y")
+
+```
+
+
+#### Applying the Prophet model on the number confirmed cases for USA    
+  
+Here, Prophet model is framing the forecasting as a curve-fitting problem rather than explicitly looking at the time-based dependence of each observation within a time series.  
+
+```{r,eval=TRUE, message=FALSE, warning=FALSE}
+
+m <- prophet(coronaData_confirmedUS)
+
+future <- make_future_dataframe(m,periods = 45)
+
+forecastUS <- predict(m, future)
+
+tail(forecastUS[c('ds', 'yhat', 'yhat_lower', 'yhat_upper')])
+
+plot(m,forecastUS) + labs(title = "Predicting Cononavirus Confirmed Cases for USA", 
+                        x= "Date", 
+                        y = "Count", daily.seasonality=TRUE )
+
+prophet_plot_components(m,forecastUS)
+
+dyplot.prophet(m,forecastUS)
+
+```
+  
+
+**Interpretation**:     
+The plots above shows an upward trend i.e., the number of confirmed cases is increasing exponentially for the upcoming days. Let's look at the components plot to analyze the daily and weekly trend.
+
+The trend plot shows an increase in the number of confirmed cases for the upcoming days, which is not good. From the weekly component plot, we can observe that the number of cases is increasing more over the weekends; also, the number of cases is decreasing from start of the week until mid-week and then again it increases starting from Thursday until Sunday. 
+
+  
+#### Predicting covid-19 death cases for USA    
+
+```{r,eval=TRUE, message=FALSE, warning=FALSE}
+
+mdeathUS <- prophet(coronaData_deathUS)
+
+futuredeathUS <- make_future_dataframe(mdeathUS,periods = 45)
+
+forecastdeathUS <- predict(mdeathUS,futuredeathUS)
+
+tail(forecastdeathUS[c('ds', 'yhat', 'yhat_lower', 'yhat_upper')])
+
+plot(mdeathUS,forecastdeathUS ) + labs(title = "Predicting Cononavirus deaths for USA", 
+                        x= "Date", 
+                        y = "Count", daily.seasonality=TRUE )
+
+```
+
+
+```{r,eval=TRUE, message=FALSE, warning=FALSE}
+
+prophet_plot_components(mdeathUS,forecastdeathUS)
+
+dyplot.prophet(mdeathUS,forecastdeathUS)
+
+```
+
+**Interpretation**:   
+The plots above shows an upward trend means that the number of fatalities is increasing rapidly for the upcoming days that is, following the same trend as of confirmed cases within USA, which is not good. Let's look at the components plot to analyze the daily and weekly trend.   
+From the weekly component plot, we can observe that the number of deaths keeps on increasing starting from Tuesday until Saturday.
+
+
+-------------------------------------
+
+**Further Analysis**:    
+
+------------------------------------
+
+#### 1.In order to understand the effect this this Pandemic and how it is progressing at a granular level, we thought of exploring the "covid19.analytics" R package.
+This package allows users to obtain live* worldwide data from the novel CoronaVirus Disease originally reported in 2019, and it is published by the JHU CCSE repository.
+
+Let's install the package
+
+```{r,eval=TRUE, message=FALSE, warning=FALSE}
+
+#install.packages("covid19.analytics")
+library(covid19.analytics)
+
+```
+
+#### 2.The 'report.summary' function generates an overall report summarizing the different datasets. Let us generate the summary report of time series data for US.
+
+```{r,eval=TRUE, message=FALSE, warning=FALSE}
+
+report.summary(cases.to.process = "TS", geo.loc = "US")
+
+```
+
+* From the above overall summary, we can see the summary report of 'ts-confirmed', 'ts-deaths', 'ts-recovered' for United States.
+The number of confirmed cases in US is 1467820 till date and number of total deaths 88754 and total recovered cases are 268376.
+* Also, we can see the percentage of "Deaths" and "Recovered" with respect to the "Confirmed" number of cases which are 6.05 and 18.28 respectively.
+
+
+#### 3.Now let us look at the daily changes, we can compute this using growth.rate() function.
+
+*The growth rate is defined as the ratio of the daily changes between two consecutive dates.*
+
+```{r,eval=TRUE, results='hide', message=FALSE, warning=FALSE}
+
+# read time series data for confirmed cases
+data <- covid19.data("ts-ALL")
+growth.rate(data, geo.loc = "US")
+
+```
+
+* From the above scatter and bar plots, we can see as the number of confirmed cases are increasing rapidly, recovered cases are increasing too which means people are getting cured faster. Less number of deaths has been observed as compared to the number of confirmed and recovered cases i.e. out of 1.4 million confirmed cases, 6% of people lead to death.
+
+
+#### 4.Let's now model the evolution of COVID virus spread using 'generate.SIR.model ()'.
+
+This function identifies the data points where the onset of the epidemy began and consider the following data points to generate a proper guess for the two parameters describing the SIR (Susceptible-Infected-Recovered) model.
+
+```{r,eval=TRUE, message=FALSE, warning=FALSE}
+
+library("plotly")
+
+# modelling the spread for the US, storing the model and generating an interactive visualization
+US.SIR.model <- generate.SIR.model(data,"US", staticPlt=FALSE)
+# plotting and visualizing the model
+plt.SIR.model(US.SIR.model,"US",interactiveFig=TRUE, fileName="US.SIR.model" )
+
+```
+
+*Note: Please ignore the last graph, as the package is still under development lead to overlapping of title on the graphs.*
+
+**Interpretation**: From the above summary, we can see that the percentage of infected people is 10.45% of the US population and around 2% of infected people lead to fatalities.
+Also, from the SIR plot, the graph for the number of susceptible and infected people seems to bend towards zero and the recovered shows an upward trend leading to people getting cured at a higher rate.
+
+
+-------------------------------------
+
+**Conclusion**:    
+
+------------------------------------
+
+* EDA analysis give the analysts a basic knowledge about the datasets, helping them to plan further steps and explore the meaningful questions.
+
+* In the analysis of the relationship between deaths and confirmed cases, the statistic result shows that for each 100 additional cases of confirmed cases, the deaths increase by 9.  
+
+* Last but not the least, with an exponential rise in the number of confirmed cases, the number of fatalities follows the trend of confirmed cases and increases rapidly over the time. 
+
+* Notably, the number of confirmed cases and deaths is at peak over the weekends, especially on Fridays and Saturdays. According to social convention, we assume that this situation caused by social activities over the weekends or the celebration of festivals. Also, we think one of the main reasons why the number of confirmed cases went up on Friday is that because this is the end of a week, the test center needs to release their results.  
+
+* Infected people are getting recovered at a faster rate and the number of confirmed cases till date lead to 1.4 Million out of which 6% of infected people lead to fatalities and around 18% has been recovered.
+
+
+-------------------------------------
+
+**References**:    
+
+------------------------------------
+
+* National Center for Immunization and Respiratory Diseases (NCIRD), Division of Viral Diseases. Coronavirus Disease 2019 (COVID-19). https://www.cdc.gov/coronavirus/2019-ncov/index.html
+
+* Johns Hopkins COVID-19 Case Tracker - dataset by associatedpress. (2020, May 13). Retrieved from https://data.world/associatedpress/johns-hopkins-coronavirus-case-tracker
+
+* Ryankarlos. (2020).Automatic Forecasting Procedure [PDF file]. Retrieved from https://cran.r-project.org/web/packages/prophet/prophet.pdf
+
+* NCHS Urban-Rural Classification Scheme for Counties. https://www.cdc.gov/nchs/data_access/urban_rural.htm
+
+* mponce0. (n.d.). mponce0/covid19.analytics. Retrieved from https://github.com/mponce0/covid19.analytics
+
+
+
